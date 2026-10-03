@@ -1,0 +1,933 @@
+/**
+ * AI OFFICE — Backend (all-in-one)
+ * รวมทุกไฟล์เป็นไฟล์เดียวเพื่อก๊อบวางง่าย — Apps Script มองทุกไฟล์เป็น scope
+ * เดียวกันอยู่แล้ว จึงรันได้เหมือนตอนแยกไฟล์ทุกประการ
+ * เริ่มต้นใช้งาน: วางไฟล์นี้ทับ Code.gs ที่ Apps Script สร้างให้อัตโนมัติ
+ * แล้วจึงเปิด appsscript.json (แยกวางต่างหาก) ตามที่อธิบายใน README
+ */
+
+// ── Utils ─────────────────────────────────────────────
+/**
+ * Utils.gs
+ * Shared helpers used by every other file: ID generation, JSON responses,
+ * timestamps, and safe access to Script Properties (where API keys and
+ * generated Sheet/Drive IDs live).
+ */
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+/** Time-sortable, human-scannable ID, e.g. PRJ_M1A2B3C4XY */
+function generateId(prefix) {
+  var stamp = Date.now().toString(36).toUpperCase();
+  var rand = Math.floor(Math.random() * 46656).toString(36).toUpperCase(); // up to 3 chars
+  return prefix + '_' + stamp + rand;
+}
+
+function jsonResponse(payload) {
+  return ContentService
+    .createTextOutput(JSON.stringify(payload))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function okResponse(data) {
+  return jsonResponse({ ok: true, data: data });
+}
+
+function errorResponse(message, code) {
+  return jsonResponse({ ok: false, error: String(message), code: code || 'ERROR' });
+}
+
+function safeParseJson(str, fallback) {
+  try {
+    return JSON.parse(str);
+  } catch (e) {
+    return fallback !== undefined ? fallback : null;
+  }
+}
+
+/** Reads a required Script Property; throws a clear, actionable error if missing. */
+function requireProperty(key) {
+  var value = PropertiesService.getScriptProperties().getProperty(key);
+  if (!value) {
+    throw new Error('Missing Script Property "' + key + '" — set it under Project Settings > Script Properties.');
+  }
+  return value;
+}
+
+function getProperty(key, fallback) {
+  var value = PropertiesService.getScriptProperties().getProperty(key);
+  return value === null ? fallback : value;
+}
+
+// ── Auth ─────────────────────────────────────────────
+/**
+ * Auth.gs
+ * Lightweight allowlist for a single-user / small-team system.
+ *
+ * Real access control happens at the Web App deployment level:
+ *   Deploy > New deployment > Web app > "Execute as: Me", "Who has access: Only myself"
+ * This allowlist is a second layer, useful once you widen access beyond
+ * "Only myself" (e.g. to "Anyone within [your Workspace domain]").
+ *
+ * Set it via Script Properties:
+ *   ALLOWLIST_EMAILS = you@example.com,teammate@example.com
+ * Leave it unset while developing — an empty allowlist means "allow everyone
+ * who can open the deployment", matching a single-owner dev setup.
+ */
+
+function isEmailAllowed(email) {
+  if (!email) return false;
+  var allowlist = getProperty('ALLOWLIST_EMAILS', '');
+  var allowed = allowlist.split(',').map(function (s) { return s.trim().toLowerCase(); }).filter(Boolean);
+  if (allowed.length === 0) return true;
+  return allowed.indexOf(email.toLowerCase()) !== -1;
+}
+
+function getCurrentUserEmail() {
+  try {
+    return Session.getActiveUser().getEmail() || Session.getEffectiveUser().getEmail();
+  } catch (e) {
+    return '';
+  }
+}
+
+function assertAuthorized() {
+  var email = getCurrentUserEmail();
+  if (!isEmailAllowed(email)) {
+    throw new Error('Unauthorized: ' + (email || 'unknown user'));
+  }
+  return email;
+}
+
+// ── SheetsService ─────────────────────────────────────────────
+/**
+ * SheetsService.gs
+ * The only file that talks to SpreadsheetApp directly. Every other file
+ * (Projects.gs, Tasks.gs, Workflow.gs, Approval.gs...) goes through these
+ * generic functions — so if you ever outgrow Sheets and move to a real
+ * database, this is the one file to rewrite.
+ */
+
+function getDb() {
+  var id = requireProperty('SPREADSHEET_ID');
+  return SpreadsheetApp.openById(id);
+}
+
+function getSheet_(name) {
+  var sheet = getDb().getSheetByName(name);
+  if (!sheet) throw new Error('Sheet not found: "' + name + '" — run Setup.gs > runSetup() first.');
+  return sheet;
+}
+
+function getHeaders_(sheet) {
+  var lastCol = sheet.getLastColumn();
+  if (lastCol === 0) return [];
+  return sheet.getRange(1, 1, 1, lastCol).getValues()[0];
+}
+
+function rowToObject_(headers, row) {
+  var obj = {};
+  headers.forEach(function (h, i) { obj[h] = row[i]; });
+  return obj;
+}
+
+/** Returns every data row (below the header) as an array of plain objects. */
+function getAllRows(sheetName) {
+  var sheet = getSheet_(sheetName);
+  var headers = getHeaders_(sheet);
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2 || headers.length === 0) return [];
+  var values = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+  return values
+    .map(function (row) { return rowToObject_(headers, row); })
+    .filter(function (o) { return String(o[headers[0]]) !== ''; });
+}
+
+/** Appends one row built from an object; keys not in the header row are ignored. */
+function appendRow(sheetName, obj) {
+  var sheet = getSheet_(sheetName);
+  var headers = getHeaders_(sheet);
+  var row = headers.map(function (h) { return obj.hasOwnProperty(h) ? obj[h] : ''; });
+  sheet.appendRow(row);
+  return obj;
+}
+
+/** Locates the row where idColumn === idValue. Returns {rowIndex (1-based), data, headers} or null. */
+function findRowById_(sheetName, idColumn, idValue) {
+  var sheet = getSheet_(sheetName);
+  var headers = getHeaders_(sheet);
+  var idIdx = headers.indexOf(idColumn);
+  if (idIdx === -1) throw new Error('Column not found: "' + idColumn + '" in ' + sheetName);
+  var lastRow = sheet.getLastRow();
+  if (lastRow < 2) return null;
+  var values = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
+  for (var i = 0; i < values.length; i++) {
+    if (String(values[i][idIdx]) === String(idValue)) {
+      return { rowIndex: i + 2, data: rowToObject_(headers, values[i]), headers: headers };
+    }
+  }
+  return null;
+}
+
+function getById(sheetName, idColumn, idValue) {
+  var found = findRowById_(sheetName, idColumn, idValue);
+  return found ? found.data : null;
+}
+
+/** Merges `updates` onto the matching row and writes it back in place. */
+function updateById(sheetName, idColumn, idValue, updates) {
+  var sheet = getSheet_(sheetName);
+  var found = findRowById_(sheetName, idColumn, idValue);
+  if (!found) throw new Error('Row not found: ' + sheetName + '.' + idColumn + ' = ' + idValue);
+  var headers = found.headers;
+  var merged = Object.assign({}, found.data, updates);
+  var row = headers.map(function (h) { return merged.hasOwnProperty(h) ? merged[h] : ''; });
+  sheet.getRange(found.rowIndex, 1, 1, headers.length).setValues([row]);
+  return merged;
+}
+
+/** Simple equality filter across all rows of a sheet — fine at MVP scale (dozens–low thousands of rows). */
+function queryRows(sheetName, filters) {
+  var rows = getAllRows(sheetName);
+  if (!filters) return rows;
+  var keys = Object.keys(filters);
+  return rows.filter(function (row) {
+    return keys.every(function (k) { return String(row[k]) === String(filters[k]); });
+  });
+}
+
+// ── DriveService ─────────────────────────────────────────────
+/**
+ * DriveService.gs
+ * Wraps DriveApp around the "AI OFFICE" folder structure that Setup.gs
+ * creates (01_SYSTEM ... 08_REPORTS). Images/videos/documents live here;
+ * the FILES sheet only stores metadata + drive_file_id pointing back to them.
+ */
+
+function getSystemSubfolder_(name) {
+  var id = getProperty('FOLDER_' + name, '');
+  if (!id) throw new Error('Unknown system folder "' + name + '" — run Setup.gs > runSetup() first.');
+  return DriveApp.getFolderById(id);
+}
+
+/** Gets (or lazily creates) the per-project folder under 02_PROJECTS. */
+function getOrCreateProjectFolder(projectId, projectName) {
+  var parent = getSystemSubfolder_('02_PROJECTS');
+  var folderName = projectId + ' - ' + projectName;
+  var existing = parent.getFoldersByName(folderName);
+  if (existing.hasNext()) return existing.next();
+  return parent.createFolder(folderName);
+}
+
+/** Saves a base64 payload (e.g. an AI-generated image) into a project's Drive folder and returns its metadata. */
+function saveBase64File(projectId, projectName, base64Data, fileName, mimeType) {
+  var folder = getOrCreateProjectFolder(projectId, projectName);
+  var bytes = Utilities.base64Decode(base64Data);
+  var blob = Utilities.newBlob(bytes, mimeType, fileName);
+  var file = folder.createFile(blob);
+  appendRow('FILES', {
+    file_id: generateId('FIL'),
+    project_id: projectId,
+    step_id: '',
+    file_name: file.getName(),
+    file_type: mimeType,
+    drive_file_id: file.getId(),
+    version: 1,
+    status: 'ACTIVE',
+    created_at: nowIso(),
+  });
+  return { id: file.getId(), url: file.getUrl(), name: file.getName() };
+}
+
+function listProjectFiles(projectId, projectName) {
+  var folder = getOrCreateProjectFolder(projectId, projectName);
+  var it = folder.getFiles();
+  var out = [];
+  while (it.hasNext()) {
+    var f = it.next();
+    out.push({ id: f.getId(), name: f.getName(), url: f.getUrl(), size: f.getSize(), mimeType: f.getMimeType() });
+  }
+  return out;
+}
+
+// ── Setup ─────────────────────────────────────────────
+/**
+ * Setup.gs
+ * -----------------------------------------------------------------------
+ * Run this ONCE, manually, from the Apps Script editor:
+ *   1. Select `runSetup` in the function dropdown (top toolbar)
+ *   2. Click ▶ Run (you'll be asked to authorize Sheets/Drive scopes — allow it)
+ *   3. Check View > Logs (or Execution log) for the Spreadsheet/Drive links
+ *
+ * It will:
+ *   - Create "AI_OFFICE_DATABASE" with every tab + header row from the
+ *     blueprint (USERS, AGENTS, PROJECTS, TASKS, WORKFLOW_STEPS, APPROVALS,
+ *     FILES, AI_LOGS), and seed AGENTS with the 8 default AI employees.
+ *   - Create the "AI OFFICE" Drive folder with its 8 subfolders
+ *     (01_SYSTEM ... 08_REPORTS).
+ *   - Save every generated ID into Script Properties so the rest of the
+ *     backend can find them (SPREADSHEET_ID, DRIVE_ROOT_FOLDER_ID, FOLDER_*).
+ *
+ * Safe to re-run — it reuses anything that already exists instead of
+ * duplicating it.
+ * -----------------------------------------------------------------------
+ */
+
+var SHEET_SCHEMA = {
+  USERS: ['user_id', 'email', 'name', 'role', 'status', 'created_at'],
+  AGENTS: ['agent_id', 'agent_name', 'role', 'description', 'primary_model', 'secondary_model', 'status', 'system_prompt'],
+  PROJECTS: ['project_id', 'project_name', 'description', 'type', 'status', 'current_step', 'progress', 'created_at', 'updated_at'],
+  TASKS: ['task_id', 'project_id', 'step_id', 'agent_id', 'task_type', 'instruction', 'status', 'input', 'output', 'version', 'created_at', 'updated_at'],
+  WORKFLOW_STEPS: ['step_id', 'project_id', 'step_order', 'step_name', 'agent_id', 'status', 'requires_approval', 'depends_on', 'version'],
+  APPROVALS: ['approval_id', 'project_id', 'step_id', 'version', 'status', 'feedback', 'approved_by', 'created_at'],
+  FILES: ['file_id', 'project_id', 'step_id', 'file_name', 'file_type', 'drive_file_id', 'version', 'status', 'created_at'],
+  AI_LOGS: ['log_id', 'project_id', 'task_id', 'agent_id', 'model', 'action', 'input', 'output', 'timestamp', 'duration'],
+};
+
+var DRIVE_SUBFOLDERS = ['01_SYSTEM', '02_PROJECTS', '03_KNOWLEDGE', '04_AI_OUTPUTS', '05_APPROVED', '06_REJECTED', '07_ASSETS', '08_REPORTS'];
+
+// agent_id, agent_name, role, description, primary_model, secondary_model, status, system_prompt
+// primary/secondary_model values must match the keys in AI_Router.gs's PROVIDERS map: chatgpt | claude | gemini | grok
+var DEFAULT_AGENTS = [
+  ['AG000', 'AI Manager', 'Orchestrator', 'วิเคราะห์งานที่ Boss สั่ง แล้วเลือก Workflow ที่เหมาะสม', 'chatgpt', 'claude', 'ACTIVE',
+    'คุณคือ AI Manager ของ AI OFFICE หน้าที่ของคุณคือวิเคราะห์คำสั่งงานของ Boss แล้วตอบกลับเป็น JSON ที่ระบุประเภทงานและขั้นตอนที่ต้องทำ ห้ามลงมือทำงานเอง ห้ามข้าม Approval Gate ใดๆ'],
+  ['AG001', 'Content Agent', 'Content', 'คิดคอนเซ็ปต์และเขียนสคริปต์', 'claude', 'chatgpt', 'ACTIVE',
+    'คุณคือ Content Strategist ทำตามข้อมูลที่ได้รับเท่านั้น ห้ามแต่งข้อมูลที่ไม่มีหลักฐาน หากข้อมูลไม่พอให้ระบุว่าต้องการข้อมูลเพิ่มแทนการเดา ตอบกลับเป็น JSON ตาม schema ของขั้นตอนนั้นๆ เท่านั้น'],
+  ['AG002', 'Marketing Agent', 'Marketing', 'วางกลยุทธ์การตลาดและแผนโปรโมท', 'chatgpt', 'gemini', 'ACTIVE',
+    'คุณคือ Marketing Strategist วิเคราะห์และวางกลยุทธ์การตลาดจากข้อมูลที่ได้รับ ตอบกลับเป็น JSON ตาม schema ที่กำหนด'],
+  ['AG003', 'Document Agent', 'Document', 'จัดทำรายงานและเอกสาร', 'gemini', 'claude', 'ACTIVE',
+    'คุณคือ Document Specialist สรุปและจัดทำรายงานจากข้อมูลที่ได้รับอย่างถูกต้องและกระชับ ตอบกลับเป็น JSON ตาม schema ที่กำหนด'],
+  ['AG004', 'Prompt Agent', 'Production', 'แปลงสคริปต์เป็น Prompt สำหรับสร้างสื่อ', 'claude', 'grok', 'ACTIVE',
+    'คุณคือ Prompt Engineer แปลงสคริปต์/คอนเซ็ปต์ให้เป็น Prompt ที่ใช้สร้างภาพ/วิดีโอได้จริง ตอบกลับเป็น JSON ตาม schema ที่กำหนด'],
+  ['AG005', 'Image/Video Agent', 'Production', 'สร้างภาพและวิดีโอ', 'grok', 'gemini', 'ACTIVE',
+    'คุณคือ Creative Producer สร้างคำอธิบายภาพ/วิดีโอที่ละเอียดและใช้งานได้จริงจาก Prompt ที่ได้รับ ตอบกลับเป็น JSON ตาม schema ที่กำหนด'],
+  ['AG006', 'Editor Agent', 'Production', 'ทำ Editing Plan สำหรับ CapCut', 'claude', 'chatgpt', 'ACTIVE',
+    'คุณคือ Video Editor วางแผนการตัดต่อเป็นช่วงเวลา (timestamp) ที่ชัดเจนจาก Asset/Script ที่ได้รับ ตอบกลับเป็น JSON ตาม schema ที่กำหนด'],
+  ['AG007', 'QA Agent', 'QA', 'ตรวจสอบคุณภาพก่อนส่ง Boss', 'chatgpt', 'claude', 'ACTIVE',
+    'คุณคือ QA Reviewer ตรวจสอบว่า Output ตรงโจทย์ ครบถ้วน ไม่มีข้อมูลที่ AI แต่งขึ้นเอง และ Format ถูกต้อง ตอบกลับเป็น JSON: {"pass": true/false, "issues": [...]}'],
+];
+
+function runSetup() {
+  var props = PropertiesService.getScriptProperties();
+  var ss = setupSpreadsheet_(props);
+  var root = setupDriveFolders_(props);
+  Logger.log('DONE.');
+  Logger.log('Spreadsheet: ' + ss.getUrl());
+  Logger.log('Drive root:  ' + root.getUrl());
+  Logger.log('Next steps: add your AI provider API keys as Script Properties ' +
+    '(OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, XAI_API_KEY), then deploy as a Web App. See README.md.');
+}
+
+function setupSpreadsheet_(props) {
+  var existingId = props.getProperty('SPREADSHEET_ID');
+  var ss = null;
+  if (existingId) {
+    try { ss = SpreadsheetApp.openById(existingId); } catch (e) { ss = null; }
+  }
+  if (!ss) {
+    ss = SpreadsheetApp.create('AI_OFFICE_DATABASE');
+    props.setProperty('SPREADSHEET_ID', ss.getId());
+  }
+
+  Object.keys(SHEET_SCHEMA).forEach(function (name) {
+    var sheet = ss.getSheetByName(name);
+    if (!sheet) sheet = ss.insertSheet(name);
+    var headers = SHEET_SCHEMA[name];
+    sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sheet.setFrozenRows(1);
+    sheet.getRange(1, 1, 1, headers.length)
+      .setFontWeight('bold').setBackground('#14141f').setFontColor('#ffffff');
+  });
+
+  // Remove the default empty "Sheet1" once real tabs exist.
+  var def = ss.getSheetByName('Sheet1');
+  if (def && ss.getSheets().length > 1) ss.deleteSheet(def);
+
+  // Seed AGENTS exactly once.
+  var agentsSheet = ss.getSheetByName('AGENTS');
+  if (agentsSheet.getLastRow() < 2) {
+    agentsSheet.getRange(2, 1, DEFAULT_AGENTS.length, DEFAULT_AGENTS[0].length).setValues(DEFAULT_AGENTS);
+  }
+
+  return ss;
+}
+
+function setupDriveFolders_(props) {
+  var rootId = props.getProperty('DRIVE_ROOT_FOLDER_ID');
+  var root = null;
+  if (rootId) {
+    try { root = DriveApp.getFolderById(rootId); } catch (e) { root = null; }
+  }
+  if (!root) {
+    root = DriveApp.createFolder('AI OFFICE');
+    props.setProperty('DRIVE_ROOT_FOLDER_ID', root.getId());
+  }
+
+  DRIVE_SUBFOLDERS.forEach(function (name) {
+    var propKey = 'FOLDER_' + name;
+    var existingId = props.getProperty(propKey);
+    var folder = null;
+    if (existingId) {
+      try { folder = DriveApp.getFolderById(existingId); } catch (e) { folder = null; }
+    }
+    if (!folder) {
+      var found = root.getFoldersByName(name);
+      folder = found.hasNext() ? found.next() : root.createFolder(name);
+      props.setProperty(propKey, folder.getId());
+    }
+  });
+
+  return root;
+}
+
+// ── Projects ─────────────────────────────────────────────
+/**
+ * Projects.gs
+ */
+
+function createProject(input) {
+  var id = generateId('PRJ');
+  var now = nowIso();
+  var project = {
+    project_id: id,
+    project_name: input.name,
+    description: input.description || '',
+    type: input.type || 'General',
+    status: 'ANALYZING',
+    current_step: 0,
+    progress: 0,
+    created_at: now,
+    updated_at: now,
+  };
+  appendRow('PROJECTS', project);
+  getOrCreateProjectFolder(id, project.project_name); // pre-create its Drive folder
+  return project;
+}
+
+function listProjects() {
+  return getAllRows('PROJECTS').sort(function (a, b) {
+    return new Date(b.updated_at) - new Date(a.updated_at);
+  });
+}
+
+function getProject(projectId) {
+  var project = getById('PROJECTS', 'project_id', projectId);
+  if (!project) throw new Error('Project not found: ' + projectId);
+  project.steps = getWorkflowSteps(projectId);
+  return project;
+}
+
+function touchProject_(projectId, updates) {
+  updates.updated_at = nowIso();
+  return updateById('PROJECTS', 'project_id', projectId, updates);
+}
+
+// ── Tasks ─────────────────────────────────────────────
+/**
+ * Tasks.gs
+ * A "task" is one AI_Router call tied to a workflow step — kept separate
+ * from WORKFLOW_STEPS so a step can be retried (new task, same step,
+ * version+1) without ever losing the audit trail (Rule #4: log everything).
+ */
+
+function createTask(projectId, stepId, agentId, taskType, instruction, input) {
+  var task = {
+    task_id: generateId('TSK'),
+    project_id: projectId,
+    step_id: stepId,
+    agent_id: agentId,
+    task_type: taskType,
+    instruction: instruction,
+    status: 'RUNNING',
+    input: typeof input === 'string' ? input : JSON.stringify(input),
+    output: '',
+    version: 1,
+    created_at: nowIso(),
+    updated_at: nowIso(),
+  };
+  appendRow('TASKS', task);
+  return task;
+}
+
+function completeTask(taskId, output, status) {
+  return updateById('TASKS', 'task_id', taskId, {
+    output: typeof output === 'string' ? output : JSON.stringify(output),
+    status: status || 'DONE',
+    updated_at: nowIso(),
+  });
+}
+
+function listTasksForProject(projectId) {
+  return queryRows('TASKS', { project_id: projectId });
+}
+
+// ── Workflow ─────────────────────────────────────────────
+/**
+ * Workflow.gs
+ * Workflow templates (per project type) + the dependency graph from the
+ * blueprint: when a step changes, everything that depends_on it must be
+ * considered for regeneration (Rule #3).
+ */
+
+var WORKFLOW_TEMPLATES = {
+  'Video Content': [
+    { name: 'วิเคราะห์โจทย์', agent: 'AG000', requiresApproval: false },
+    { name: 'คิดคอนเซ็ปต์', agent: 'AG001', requiresApproval: true },
+    { name: 'เขียนสคริปต์', agent: 'AG001', requiresApproval: true },
+    { name: 'เขียน Prompt', agent: 'AG004', requiresApproval: true },
+    { name: 'สร้างวิดีโอ', agent: 'AG005', requiresApproval: true },
+    { name: 'ตัดต่อวิดีโอ', agent: 'AG006', requiresApproval: true },
+    { name: 'ตรวจสอบ QA', agent: 'AG007', requiresApproval: true },
+  ],
+  Document: [
+    { name: 'เก็บข้อมูล', agent: 'AG003', requiresApproval: false },
+    { name: 'วิเคราะห์', agent: 'AG003', requiresApproval: false },
+    { name: 'สร้างรายงาน', agent: 'AG003', requiresApproval: true },
+    { name: 'ตรวจสอบ', agent: 'AG007', requiresApproval: true },
+  ],
+  General: [
+    { name: 'วิเคราะห์โจทย์', agent: 'AG000', requiresApproval: false },
+    { name: 'ดำเนินการ', agent: 'AG001', requiresApproval: true },
+    { name: 'ตรวจสอบ QA', agent: 'AG007', requiresApproval: true },
+  ],
+};
+
+/** Creates every WORKFLOW_STEPS row for a project. Step 1 is READY, the rest LOCKED. */
+function createWorkflowSteps(projectId, type) {
+  var template = WORKFLOW_TEMPLATES[type] || WORKFLOW_TEMPLATES.General;
+  var steps = [];
+  template.forEach(function (def, i) {
+    var step = {
+      step_id: generateId('STP'),
+      project_id: projectId,
+      step_order: i + 1,
+      step_name: def.name,
+      agent_id: def.agent,
+      status: i === 0 ? 'READY' : 'LOCKED',
+      requires_approval: def.requiresApproval ? 'TRUE' : 'FALSE',
+      depends_on: i === 0 ? '' : steps[i - 1].step_id,
+      version: 1,
+    };
+    appendRow('WORKFLOW_STEPS', step);
+    steps.push(step);
+  });
+  return steps;
+}
+
+function getWorkflowSteps(projectId) {
+  return queryRows('WORKFLOW_STEPS', { project_id: projectId })
+    .sort(function (a, b) { return a.step_order - b.step_order; });
+}
+
+function getStep(stepId) {
+  var step = getById('WORKFLOW_STEPS', 'step_id', stepId);
+  if (!step) throw new Error('Step not found: ' + stepId);
+  return step;
+}
+
+/** Every step (direct + transitive) that depends_on the given step. */
+function getDependentSteps(projectId, stepId) {
+  var steps = getWorkflowSteps(projectId);
+  var dependents = [];
+  var frontier = [stepId];
+  while (frontier.length) {
+    var current = frontier.pop();
+    steps.forEach(function (s) {
+      if (s.depends_on === current) {
+        dependents.push(s);
+        frontier.push(s.step_id);
+      }
+    });
+  }
+  return dependents;
+}
+
+function setStepStatus(stepId, status, extra) {
+  var updates = Object.assign({ status: status }, extra || {});
+  return updateById('WORKFLOW_STEPS', 'step_id', stepId, updates);
+}
+
+// ── Approval ─────────────────────────────────────────────
+/**
+ * Approval.gs
+ * Implements Rule #1 (AI never skips the approval gate), #2 (reject ->
+ * reason -> AI revises -> re-submit), #3 (upstream change cascades to
+ * dependent steps), #4 (log everything).
+ */
+
+/** Runs the AI for a step and marks it WAITING_APPROVAL (or DONE if requires_approval is FALSE). */
+function runStep(projectId, stepId) {
+  var project = getById('PROJECTS', 'project_id', projectId);
+  var step = getStep(stepId);
+  var agent = getById('AGENTS', 'agent_id', step.agent_id);
+  if (!agent) throw new Error('Agent not found: ' + step.agent_id);
+
+  setStepStatus(stepId, 'RUNNING');
+
+  var priorSteps = getWorkflowSteps(projectId).filter(function (s) { return s.step_order < step.step_order; });
+  var context = buildStepContext_(project, step, priorSteps);
+
+  var task = createTask(projectId, stepId, agent.agent_id, step.step_name, context.instruction, context.contextText);
+  var result = callAgent(agent, context.instruction, context.contextText);
+  completeTask(task.task_id, result.text, result.ok ? 'DONE' : 'FAILED');
+  logAi_(projectId, task.task_id, agent.agent_id, result.model, 'run_step', context.contextText, result.text, result.durationMs);
+
+  if (!result.ok) {
+    setStepStatus(stepId, 'FAILED');
+    return { step: getStep(stepId), task: task, result: result };
+  }
+
+  var needsApproval = String(step.requires_approval).toUpperCase() === 'TRUE';
+  setStepStatus(stepId, needsApproval ? 'WAITING_APPROVAL' : 'DONE');
+  if (!needsApproval) advanceWorkflow_(projectId, step);
+
+  return { step: getStep(stepId), task: task, result: result };
+}
+
+function buildStepContext_(project, step, priorSteps) {
+  var priorOutputs = priorSteps.map(function (s) {
+    var tasks = queryRows('TASKS', { step_id: s.step_id }).filter(function (t) { return t.status === 'DONE'; });
+    var latest = tasks[tasks.length - 1];
+    return latest ? { step: s.step_name, output: latest.output } : null;
+  }).filter(Boolean);
+
+  var instruction = 'ทำขั้นตอน "' + step.step_name + '" สำหรับโปรเจกต์ "' + project.project_name + '" (ประเภท: ' + project.type + ')';
+  var contextText = 'PROJECT: ' + project.project_name +
+    '\nDESCRIPTION: ' + (project.description || '-') +
+    '\n\nPRIOR STEP OUTPUTS:\n' + (priorOutputs.length
+      ? priorOutputs.map(function (p) { return '- ' + p.step + ': ' + p.output; }).join('\n')
+      : '(none — this is an early step)') +
+    '\n\nRespond ONLY with JSON matching a reasonable structured schema for this step type. No prose outside the JSON.';
+
+  return { instruction: instruction, contextText: contextText };
+}
+
+/** Boss approves the step currently WAITING_APPROVAL. */
+function approveStep(stepId, feedback, approvedBy) {
+  var step = getStep(stepId);
+  setStepStatus(stepId, 'DONE');
+  logApproval_(step.project_id, stepId, step.version, 'APPROVED', feedback || '', approvedBy);
+  advanceWorkflow_(step.project_id, step);
+  return getStep(stepId);
+}
+
+/** Unlocks + runs the next step in order; marks the project DONE once the last step is approved. */
+function advanceWorkflow_(projectId, completedStep) {
+  var steps = getWorkflowSteps(projectId);
+  var next = steps.filter(function (s) { return s.step_order === completedStep.step_order + 1; })[0];
+  var doneCount = steps.filter(function (s) { return s.status === 'DONE'; }).length;
+  touchProject_(projectId, { current_step: completedStep.step_order, progress: Math.round((doneCount / steps.length) * 100) });
+
+  if (!next) {
+    touchProject_(projectId, { status: 'DONE', progress: 100 });
+    return;
+  }
+  setStepStatus(next.step_id, 'READY');
+  runStep(projectId, next.step_id);
+}
+
+/**
+ * Boss rejects a step with a reason. Per Rule #2/#3: bump the step's
+ * version, re-run it with the feedback folded in, and — if rollbackScope is
+ * "cascade" — lock every dependent step so they get regenerated once this
+ * step is re-approved and the workflow reaches them again.
+ * rollbackScope: 'self' (default) | 'cascade'
+ */
+function rejectStep(stepId, feedback, rollbackScope, rejectedBy) {
+  var step = getStep(stepId);
+  logApproval_(step.project_id, stepId, step.version, 'REJECTED', feedback, rejectedBy);
+
+  if (rollbackScope === 'cascade') {
+    getDependentSteps(step.project_id, stepId).forEach(function (s) {
+      setStepStatus(s.step_id, 'LOCKED');
+    });
+  }
+
+  setStepStatus(stepId, 'REVISING', { version: Number(step.version) + 1 });
+
+  var project = getById('PROJECTS', 'project_id', step.project_id);
+  var agent = getById('AGENTS', 'agent_id', step.agent_id);
+  var priorSteps = getWorkflowSteps(step.project_id).filter(function (s) { return s.step_order < step.step_order; });
+  var context = buildStepContext_(project, step, priorSteps);
+
+  var priorTasks = queryRows('TASKS', { step_id: stepId }).filter(function (t) { return t.status === 'DONE'; });
+  var previousOutput = priorTasks.length ? priorTasks[priorTasks.length - 1].output : '(no previous output)';
+
+  var revisePrompt = context.contextText +
+    '\n\nPREVIOUS OUTPUT (rejected by Boss):\n' + previousOutput +
+    '\n\nBOSS FEEDBACK (reason for rejection):\n' + feedback +
+    '\n\nProduce a revised version (v' + (Number(step.version) + 1) + ') that directly addresses the feedback above.';
+
+  var task = createTask(step.project_id, stepId, agent.agent_id, step.step_name + ' (revision)', context.instruction, revisePrompt);
+  var result = callAgent(agent, context.instruction, revisePrompt);
+  completeTask(task.task_id, result.text, result.ok ? 'DONE' : 'FAILED');
+  logAi_(step.project_id, task.task_id, agent.agent_id, result.model, 'revise_step', revisePrompt, result.text, result.durationMs);
+
+  setStepStatus(stepId, result.ok ? 'WAITING_APPROVAL' : 'FAILED');
+  return getStep(stepId);
+}
+
+function logApproval_(projectId, stepId, version, status, feedback, approvedBy) {
+  appendRow('APPROVALS', {
+    approval_id: generateId('APR'),
+    project_id: projectId,
+    step_id: stepId,
+    version: version,
+    status: status,
+    feedback: feedback || '',
+    approved_by: approvedBy || getCurrentUserEmail(),
+    created_at: nowIso(),
+  });
+}
+
+function logAi_(projectId, taskId, agentId, model, action, input, output, durationMs) {
+  appendRow('AI_LOGS', {
+    log_id: generateId('LOG'),
+    project_id: projectId,
+    task_id: taskId,
+    agent_id: agentId,
+    model: model,
+    action: action,
+    input: String(input).slice(0, 5000),
+    output: String(output).slice(0, 5000),
+    timestamp: nowIso(),
+    duration: durationMs || 0,
+  });
+}
+
+// ── AI_Router ─────────────────────────────────────────────
+/**
+ * AI_Router.gs
+ * Agents never call an AI provider directly — every call goes through here.
+ * That means switching a Role's model (e.g. Content Agent: Claude -> ChatGPT)
+ * is a one-cell edit in the AGENTS sheet, zero code changes.
+ */
+
+var PROVIDERS = {
+  chatgpt: callOpenAI,
+  claude: callClaude,
+  gemini: callGemini,
+  grok: callGrok,
+};
+
+/**
+ * @param agent        a row from AGENTS (agent_id, primary_model, secondary_model, system_prompt, ...)
+ * @param instruction  short task instruction
+ * @param contextText  full prompt body (prior outputs, feedback, schema hint, etc.)
+ * @return {ok, text, model, durationMs}
+ */
+function callAgent(agent, instruction, contextText) {
+  var systemPrompt = agent.system_prompt ||
+    ('You are ' + agent.agent_name + ', role: ' + agent.role + '. Always answer with structured JSON.');
+  var userPrompt = instruction + '\n\n' + contextText;
+
+  var order = [agent.primary_model, agent.secondary_model].filter(Boolean);
+  var lastError = null;
+
+  for (var i = 0; i < order.length; i++) {
+    var model = String(order[i]).toLowerCase();
+    var fn = PROVIDERS[model];
+    if (!fn) { lastError = 'Unknown provider: ' + model; continue; }
+    var started = Date.now();
+    try {
+      var text = fn(systemPrompt, userPrompt);
+      return { ok: true, text: text, model: model, durationMs: Date.now() - started };
+    } catch (e) {
+      lastError = model + ': ' + e.message;
+      // fall through and try the secondary model
+    }
+  }
+
+  return { ok: false, text: 'AI_ROUTER_ERROR: ' + lastError, model: order[0] || 'none', durationMs: 0 };
+}
+
+// ── OpenAI ─────────────────────────────────────────────
+/**
+ * OpenAI.gs
+ * Chat Completions endpoint (broadly compatible, simple JSON in/out).
+ * Script Property required: OPENAI_API_KEY
+ * Optional: OPENAI_MODEL (default gpt-4o-mini)
+ */
+function callOpenAI(systemPrompt, userPrompt) {
+  var apiKey = requireProperty('OPENAI_API_KEY');
+  var res = UrlFetchApp.fetch('https://api.openai.com/v1/chat/completions', {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { Authorization: 'Bearer ' + apiKey },
+    muteHttpExceptions: true,
+    payload: JSON.stringify({
+      model: getProperty('OPENAI_MODEL', 'gpt-4o-mini'),
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      temperature: 0.7,
+    }),
+  });
+  var body = safeParseJson(res.getContentText(), {});
+  if (res.getResponseCode() >= 300) throw new Error((body.error && body.error.message) || res.getContentText());
+  return body.choices[0].message.content;
+}
+
+// ── Claude ─────────────────────────────────────────────
+/**
+ * Claude.gs
+ * Anthropic Messages API.
+ * Script Property required: ANTHROPIC_API_KEY
+ * Optional: ANTHROPIC_MODEL (default claude-sonnet-4-6)
+ */
+function callClaude(systemPrompt, userPrompt) {
+  var apiKey = requireProperty('ANTHROPIC_API_KEY');
+  var res = UrlFetchApp.fetch('https://api.anthropic.com/v1/messages', {
+    method: 'post',
+    contentType: 'application/json',
+    headers: {
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    muteHttpExceptions: true,
+    payload: JSON.stringify({
+      model: getProperty('ANTHROPIC_MODEL', 'claude-sonnet-4-6'),
+      max_tokens: 2000,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userPrompt }],
+    }),
+  });
+  var body = safeParseJson(res.getContentText(), {});
+  if (res.getResponseCode() >= 300) throw new Error((body.error && body.error.message) || res.getContentText());
+  return (body.content || []).map(function (b) { return b.text || ''; }).join('\n');
+}
+
+// ── Gemini ─────────────────────────────────────────────
+/**
+ * Gemini.gs
+ * Google Generative Language API (generateContent).
+ * Script Property required: GEMINI_API_KEY
+ * Optional: GEMINI_MODEL (default gemini-2.0-flash)
+ */
+function callGemini(systemPrompt, userPrompt) {
+  var apiKey = requireProperty('GEMINI_API_KEY');
+  var model = getProperty('GEMINI_MODEL', 'gemini-2.0-flash');
+  var url = 'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent?key=' + apiKey;
+  var res = UrlFetchApp.fetch(url, {
+    method: 'post',
+    contentType: 'application/json',
+    muteHttpExceptions: true,
+    payload: JSON.stringify({
+      system_instruction: { parts: [{ text: systemPrompt }] },
+      contents: [{ role: 'user', parts: [{ text: userPrompt }] }],
+    }),
+  });
+  var body = safeParseJson(res.getContentText(), {});
+  if (res.getResponseCode() >= 300) throw new Error((body.error && body.error.message) || res.getContentText());
+  return body.candidates[0].content.parts.map(function (p) { return p.text || ''; }).join('\n');
+}
+
+// ── Grok ─────────────────────────────────────────────
+/**
+ * Grok.gs
+ * xAI text-generation endpoint (OpenAI-compatible chat completions shape).
+ * Script Property required: XAI_API_KEY
+ * Optional: XAI_MODEL (default grok-3)
+ *
+ * NOTE: image/video generation uses separate xAI endpoints with their own
+ * request/response shape. This file covers text/creative-writing calls only
+ * (e.g. the Prompt Agent asking Grok to punch up a concept). Add
+ * `callGrokImage()` / `callGrokVideo()` here once you've picked which
+ * xAI media endpoint you're integrating — see step 18 of the blueprint.
+ */
+function callGrok(systemPrompt, userPrompt) {
+  var apiKey = requireProperty('XAI_API_KEY');
+  var res = UrlFetchApp.fetch('https://api.x.ai/v1/chat/completions', {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { Authorization: 'Bearer ' + apiKey },
+    muteHttpExceptions: true,
+    payload: JSON.stringify({
+      model: getProperty('XAI_MODEL', 'grok-3'),
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+    }),
+  });
+  var body = safeParseJson(res.getContentText(), {});
+  if (res.getResponseCode() >= 300) throw new Error((body.error && body.error.message) || res.getContentText());
+  return body.choices[0].message.content;
+}
+
+// ── Main ─────────────────────────────────────────────
+/**
+ * Main.gs
+ * Web App entry point.
+ * Deploy: Deploy > New deployment > Web app
+ *   Execute as: Me
+ *   Who has access: Only myself (while testing) — widen later if needed
+ *
+ * Every request is one JSON "action", e.g.:
+ *   GET  ?action=listProjects
+ *   POST { "action": "createProject", "name": "...", "type": "Video Content" }
+ *
+ * CORS note: Apps Script Web Apps don't support custom CORS preflight
+ * handling. If the static frontend (index.html, opened from a different
+ * origin) calls this with fetch(), send POST requests with
+ * `Content-Type: text/plain;charset=utf-8` (NOT application/json) so the
+ * browser skips the preflight request — doPost() below still parses the
+ * JSON body correctly either way.
+ */
+
+var ROUTES = {
+  // Projects
+  listProjects: function () { return listProjects(); },
+  getProject: function (p) { return getProject(p.projectId); },
+  createProject: function (p) {
+    var project = createProject(p);
+    createWorkflowSteps(project.project_id, project.type);
+    var first = getWorkflowSteps(project.project_id)[0];
+    runStep(project.project_id, first.step_id);
+    return getProject(project.project_id);
+  },
+
+  // Workflow / approvals
+  getWorkflowSteps: function (p) { return getWorkflowSteps(p.projectId); },
+  approveStep: function (p) { return approveStep(p.stepId, p.feedback, p.approvedBy); },
+  rejectStep: function (p) { return rejectStep(p.stepId, p.feedback, p.rollbackScope || 'self', p.rejectedBy); },
+
+  // Agents / logs
+  listAgents: function () { return getAllRows('AGENTS'); },
+  listLogs: function (p) { return queryRows('AI_LOGS', p.projectId ? { project_id: p.projectId } : null); },
+  listTasks: function (p) { return queryRows('TASKS', p.projectId ? { project_id: p.projectId } : null); },
+
+  // Files
+  listProjectFiles: function (p) {
+    var project = getById('PROJECTS', 'project_id', p.projectId);
+    return listProjectFiles(p.projectId, project.project_name);
+  },
+};
+
+function doGet(e) {
+  return handleRequest_((e && e.parameter) || {});
+}
+
+function doPost(e) {
+  var body = {};
+  if (e && e.postData && e.postData.contents) {
+    body = safeParseJson(e.postData.contents, {});
+  }
+  var params = Object.assign({}, (e && e.parameter) || {}, body);
+  return handleRequest_(params);
+}
+
+function handleRequest_(params) {
+  try {
+    // assertAuthorized(); // uncomment once ALLOWLIST_EMAILS is set in Script Properties
+    var action = params.action;
+    var handler = ROUTES[action];
+    if (!handler) return errorResponse('Unknown action: ' + action, 'UNKNOWN_ACTION');
+    return okResponse(handler(params));
+  } catch (err) {
+    return errorResponse(err.message, 'SERVER_ERROR');
+  }
+}

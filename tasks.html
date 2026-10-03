@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tasks · AI Office</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="shell">
+    <div id="sidebar-root"></div>
+    <main class="main">
+      <div id="topbar-root"></div>
+      <div id="empty-root"></div>
+    </main>
+  </div>
+
+  <script src="js/mock-data.js"></script>
+  <script src="js/layout.js"></script>
+  <script>
+    AIOfficeLayout.init('tasks');
+    document.getElementById('topbar-root').innerHTML = AIOfficeLayout.renderTopbar({
+      title:'Tasks',
+      sub:'รายการงานย่อยของทุกโปรเจกต์ (จาก Sheet: TASKS)'
+    });
+    document.getElementById('empty-root').innerHTML = AIOfficeLayout.emptyState({
+      icon:'✅',
+      title:'ส่วนนี้ยังไม่เปิดใช้งานใน Version 1',
+      sub:'ตาม Blueprint แล้วหน้านี้จะถูกสร้างในเฟสถัดไป หลังจาก Workflow Engine หลัก (Approval / Reject / Revision / Rollback) ทำงานได้สมบูรณ์ก่อน',
+      planned: ["แสดงรายการ Task รายขั้นตอนของทุกโปรเจกต์","กรองตาม Agent / สถานะ / Deadline","เชื่อมกับ WORKFLOW_STEPS และ Dependency Graph"]
+    });
+  </script>
+</body>
+</html>

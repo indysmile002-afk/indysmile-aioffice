@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Workflow · AI Office</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="shell">
+    <div id="sidebar-root"></div>
+
+    <main class="main">
+      <div id="topbar-root"></div>
+
+      <div class="wf-header-card" id="wf-header"></div>
+
+      <div class="chain-wrap">
+        <div class="section-head">
+          <div class="section-title">WORKFLOW ขั้นตอนการทำงาน</div>
+        </div>
+        <div class="chain-row" id="chain-row"></div>
+        <div class="legend-row">
+          <div class="legend-item"><span class="legend-dot" style="background:var(--green)"></span> เสร็จสิ้น</div>
+          <div class="legend-item"><span class="legend-dot" style="background:var(--yellow)"></span> รอการอนุมัติ</div>
+          <div class="legend-item"><span class="legend-dot" style="background:var(--blue)"></span> กำลังดำเนินการ</div>
+          <div class="legend-item"><span class="legend-dot" style="background:var(--lock)"></span> รอขั้นตอนก่อนหน้า</div>
+          <div class="legend-item"><span class="legend-dot" style="background:var(--red)"></span> ถูกปฏิเสธ</div>
+        </div>
+      </div>
+
+      <div class="detail-grid">
+        <div class="detail-card" id="detail-card"></div>
+        <div class="side-panel" id="side-panel"></div>
+      </div>
+    </main>
+  </div>
+
+  <script src="js/mock-data.js"></script>
+  <script src="js/config.js"></script>
+  <script src="js/data-loader.js"></script>
+  <script src="js/layout.js"></script>
+  <script src="js/workflow.js"></script>
+</body>
+</html>

@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Projects · AI Office</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="shell">
+    <div id="sidebar-root"></div>
+    <main class="main">
+      <div id="topbar-root"></div>
+      <div class="card">
+        <div class="section-head">
+          <div class="section-title">โปรเจกต์ทั้งหมด</div>
+          <button class="btn-primary" style="width:auto; padding:9px 16px;" onclick="location.href='index.html#assign'">➕ โปรเจกต์ใหม่</button>
+        </div>
+        <div id="project-list"></div>
+      </div>
+    </main>
+  </div>
+
+  <script src="js/mock-data.js"></script>
+  <script src="js/config.js"></script>
+  <script src="js/data-loader.js"></script>
+  <script src="js/layout.js"></script>
+  <script>
+    AIOfficeLayout.init('projects');
+    document.getElementById('topbar-root').innerHTML = AIOfficeLayout.renderTopbar({
+      title:'Projects',
+      sub:'รายการโปรเจกต์ทั้งหมดที่มอบหมายให้ AI Office'
+    });
+
+    const listEl = document.getElementById('project-list');
+    listEl.innerHTML = AIOfficeLayout.loadingState('กำลังโหลดโปรเจกต์...');
+
+    (async () => {
+      try {
+        await AIOfficeData.loadDashboard(); // เติม AIOffice.projects จาก backend จริง
+        document.querySelector('.section-title').textContent = `โปรเจกต์ทั้งหมด (${AIOffice.projects.length})`;
+        listEl.innerHTML = AIOffice.projects.map(p => `
+          <div class="project-row">
+            <img class="project-thumb" src="${p.thumb}" alt="">
+            <div class="project-info">
+              <div class="project-title-row">
+                <div class="project-title">${p.name}</div>
+                ${AIOfficeLayout.statusBadge(p.status)}
+                <span class="badge badge-gray">${p.type}</span>
+              </div>
+              <div class="project-meta">สร้างเมื่อ ${p.createdAt} &nbsp;·&nbsp; อัปเดตล่าสุด ${p.updatedAt}</div>
+              ${AIOfficeLayout.miniChain(p.steps)}
+            </div>
+            <a class="project-open" href="workflow.html?id=${p.id}">ดูโปรเจกต์</a>
+          </div>`).join('') || '<div style="padding:30px; text-align:center; color:var(--text-low); font-size:13px;">ยังไม่มีโปรเจกต์ — สร้างจากหน้า Dashboard</div>';
+      } catch (err) {
+        listEl.innerHTML = AIOfficeLayout.errorState(err.message);
+      }
+    })();
+  </script>
+</body>
+</html>

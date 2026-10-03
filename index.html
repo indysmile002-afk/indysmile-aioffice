@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dashboard · AI Office</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="shell">
+    <div id="sidebar-root"></div>
+
+    <main class="main">
+      <div id="topbar-root"></div>
+
+      <!-- Task assignment -->
+      <div class="task-input-card" id="assign">
+        <h2>สวัสดีครับ Boss! 👋 &nbsp;วันนี้ AI Office พร้อมลุยงานให้คุณแล้วครับ</h2>
+        <form class="task-input-row" id="assign-form">
+          <input type="text" id="assign-input" placeholder="พิมพ์งานที่ต้องการให้ AI ทำ..." autocomplete="off">
+          <select id="assign-type" style="background:var(--bg-input); border:1px solid var(--border); border-radius:11px; color:var(--text-hi); font-family:inherit; font-size:13px; padding:0 12px;">
+            <option value="General">ทั่วไป</option>
+            <option value="Video Content">วิดีโอ</option>
+            <option value="Document">เอกสาร/รายงาน</option>
+          </select>
+          <button type="submit">🚀 มอบหมายงาน</button>
+        </form>
+        <div class="task-examples">ตัวอย่าง: สร้างวิดีโอโปรโมทสินค้า / ทำรายงานการตลาด / เขียนบทความ / ออกแบบภาพ — เลือกประเภทงานด้านบนให้ตรงกับ Workflow ที่ต้องการ</div>
+      </div>
+
+      <!-- Stats -->
+      <div class="stat-grid" id="stat-grid"></div>
+
+      <!-- Content -->
+      <div class="content-grid">
+        <!-- Projects -->
+        <div class="card">
+          <div class="section-head">
+            <div class="section-title">โปรเจกต์ของคุณ</div>
+          </div>
+          <div class="tab-row" id="tab-row"></div>
+          <div id="project-list"></div>
+        </div>
+
+        <!-- Right column -->
+        <div style="display:flex; flex-direction:column; gap:20px;">
+          <div class="card">
+            <div class="section-head">
+              <div class="section-title">รอการอนุมัติ</div>
+              <a class="link-more" href="workflow.html">ดูทั้งหมด →</a>
+            </div>
+            <div id="approvals-list"></div>
+          </div>
+
+          <div class="card">
+            <div class="section-head">
+              <div class="section-title">กิจกรรมล่าสุด</div>
+              <a class="link-more" href="reports.html">ดูทั้งหมด →</a>
+            </div>
+            <div id="activity-list"></div>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="js/mock-data.js"></script>
+  <script src="js/config.js"></script>
+  <script src="js/data-loader.js"></script>
+  <script src="js/layout.js"></script>
+  <script src="js/dashboard.js"></script>
+</body>
+</html>

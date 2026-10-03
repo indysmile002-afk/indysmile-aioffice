@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Employees · AI Office</title>
+<link rel="stylesheet" href="css/style.css">
+<style>
+  .agent-grid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:16px; }
+  .agent-card{ border:1px solid var(--border); background:var(--bg-card); border-radius:var(--radius-lg); padding:18px; transition:border-color .15s, transform .15s; }
+  .agent-card:hover{ border-color:#2c2c40; transform:translateY(-2px); }
+  .agent-top{ display:flex; align-items:center; gap:12px; margin-bottom:12px; }
+  .agent-icon{ width:46px; height:46px; border-radius:12px; display:flex; align-items:center; justify-content:center; font-size:20px; flex-shrink:0; }
+  .agent-name{ font-size:14.5px; font-weight:600; }
+  .agent-id{ font-size:10.5px; color:var(--text-low); }
+  .agent-role{ font-size:12.5px; color:var(--text-mid); line-height:1.6; margin-bottom:14px; min-height:38px; }
+  .agent-models{ display:flex; gap:8px; flex-wrap:wrap; }
+  .model-chip{ font-size:11px; font-weight:600; padding:5px 10px; border-radius:999px; border:1px solid var(--border-soft); background:var(--bg-elevated); color:var(--text-mid); }
+  .model-chip.primary{ color:#fff; background:linear-gradient(135deg,var(--accent),var(--accent-dark)); border-color:transparent; }
+</style>
+</head>
+<body>
+  <div class="shell">
+    <div id="sidebar-root"></div>
+    <main class="main">
+      <div id="topbar-root"></div>
+      <div class="agent-grid" id="agent-grid"></div>
+    </main>
+  </div>
+
+  <script src="js/mock-data.js"></script>
+  <script src="js/config.js"></script>
+  <script src="js/data-loader.js"></script>
+  <script src="js/layout.js"></script>
+  <script>
+    AIOfficeLayout.init('employees');
+    document.getElementById('topbar-root').innerHTML = AIOfficeLayout.renderTopbar({
+      title:'AI Employees',
+      sub:'พนักงาน AI ทั้งหมดในระบบ — แต่ละ Role เลือก Model ได้จาก Sheet AGENTS โดยไม่ต้องแก้โค้ด'
+    });
+
+    const COLOR_BG = {
+      purple:'rgba(124,111,242,.14)', blue:'rgba(79,140,255,.14)',
+      green:'rgba(47,214,153,.14)', yellow:'rgba(245,166,35,.14)', red:'rgba(242,85,95,.14)'
+    };
+    const grid = document.getElementById('agent-grid');
+    grid.innerHTML = AIOfficeLayout.loadingState('กำลังโหลดรายชื่อ AI Employees...');
+
+    (async () => {
+      try {
+        const agents = await AIOfficeAPI.call('listAgents');
+        grid.innerHTML = agents.map(a => {
+          const meta = AIOffice.agentMeta[a.agent_id] || { icon:'🤖', color:'blue' };
+          return `
+          <div class="agent-card">
+            <div class="agent-top">
+              <div class="agent-icon" style="background:${COLOR_BG[meta.color]}">${meta.icon}</div>
+              <div>
+                <div class="agent-name">${a.agent_name}</div>
+                <div class="agent-id mono">${a.agent_id}</div>
+              </div>
+            </div>
+            <div class="agent-role">${a.description || a.role}</div>
+            <div class="agent-models">
+              <span class="model-chip primary">${a.primary_model}</span>
+              <span class="model-chip">${a.secondary_model}</span>
+            </div>
+          </div>`;
+        }).join('');
+      } catch (err) {
+        grid.innerHTML = AIOfficeLayout.errorState(err.message);
+      }
+    })();
+  </script>
+</body>
+</html>
