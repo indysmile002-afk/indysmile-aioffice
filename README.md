@@ -102,3 +102,45 @@ listTasks: function (p) { return queryRows('TASKS', p.projectId ? { project_id: 
   เป็น `text/plain;charset=utf-8` ไม่ใช่ `application/json` (แก้แล้วในไฟล์นี้ ไม่ต้องทำอะไรเพิ่ม เว้นแต่ไปแก้เอง)
 
 
+
+---
+
+## 🤖 Agent Mode (เพิ่มใหม่): ให้ Agent ตัดสินใจและเรียกใช้เครื่องมือเอง
+
+ก่อนหน้านี้ Agent แค่ "รับโจทย์ → ตอบ" ตอนนี้ Agent **เลือกเองได้ว่าจะใช้เครื่องมือไหนก่อนส่งงาน** เช่น
+อ่านผลงานขั้นก่อนหน้าจาก Sheet, เปิดไฟล์ใน Drive, ค้นเว็บ แล้วค่อยตอบ — จากนั้นงานยังเข้าคิว **รออนุมัติจาก Boss เหมือนเดิมทุกขั้น**
+
+### เครื่องมือที่มี
+
+| Tool | ทำอะไร | ข้อจำกัดด้านความปลอดภัย |
+|---|---|---|
+| `read_sheet` | อ่านแถวล่าสุดจาก Sheet | อ่านได้เฉพาะ PROJECTS, TASKS, WORKFLOW_STEPS, APPROVALS, FILES, AI_LOGS, AGENT_MEMORY (ไม่ให้อ่าน USERS/AGENTS) |
+| `append_row` | จดบันทึกลง Sheet | เขียนได้เฉพาะ `AGENT_MEMORY`; ระบบเป็นคนใส่ project_id/agent_id/เวลาเอง |
+| `list_files` / `read_file` | ดู/อ่านไฟล์ใน Drive (txt, md, csv, json, Google Doc, Google Sheet) | อ่านได้เฉพาะโฟลเดอร์ของโปรเจกต์นั้น + `03_KNOWLEDGE` |
+| `save_file` | บันทึกไฟล์ข้อความลงโฟลเดอร์โปรเจกต์ | ลงทะเบียนใน Sheet FILES ให้อัตโนมัติ |
+| `web_search` | ค้นเว็บ (Tavily) | เปิดใช้เมื่อตั้ง `TAVILY_API_KEY` เท่านั้น |
+| `fetch_url` | อ่านหน้าเว็บสาธารณะ | http/https เท่านั้น บล็อก localhost/IP ภายใน |
+
+**Agent ไม่มีเครื่องมือที่แตะ WORKFLOW_STEPS / APPROVALS** — การอนุมัติ ปฏิเสธ ข้ามขั้น เป็นของ Boss คนเดียว
+เครื่องมือทุกครั้งที่เรียกจะถูกบันทึกใน `AI_LOGS` (action = `tool:ชื่อเครื่องมือ`) และขึ้นในหน้า Dashboard/Workflow
+
+### วิธีเปิดใช้ (ทำครั้งเดียว)
+
+1. วางไฟล์ชุดใหม่ใน Apps Script (ไฟล์ใหม่คือ `Agent.gs`; ถ้าใช้ `Code.gs.txt` ให้วางทับ `Code.gs` ทั้งไฟล์ — **อย่าใช้ทั้งสองแบบพร้อมกัน** จะเกิดฟังก์ชันซ้ำ)
+2. เลือก `runSetup` แล้วกด ▶ Run อีกครั้ง — จะเพิ่มคอลัมน์ `tools` ใน tab AGENTS, สร้าง tab `AGENT_MEMORY`
+   และใส่เครื่องมือเริ่มต้นให้แต่ละ Agent (ข้อมูลเดิมไม่ถูกลบ) **ครั้งนี้ Google จะขอสิทธิ์เพิ่ม (Google Docs) ให้กดอนุญาต**
+3. (ไม่บังคับ) ถ้าอยากให้ค้นเว็บได้ ใส่ Script Property `TAVILY_API_KEY`
+4. Deploy → Manage deployments → Edit → New version → Deploy (URL เดิม)
+
+### ปรับแต่ง
+
+- **เปลี่ยนเครื่องมือของ Agent แต่ละตัว**: แก้ในคอลัมน์ `tools` ของ tab AGENTS (คั่นด้วย comma เช่น `read_sheet,web_search`) หรือพิมพ์ `none` เพื่อปิดเครื่องมือของ Agent ตัวนั้น
+- **ปิดทั้งระบบทันที**: ตั้ง Script Property `AGENT_MODE` = `off`
+- **ค่าจำกัด** (ใน `Agent.gs`): `AGENT_MAX_TOOL_CALLS` (5 ครั้ง/งาน), `AGENT_TIME_BUDGET_MS` (หยุดใช้เครื่องมือเมื่อใกล้ครบ 6 นาทีของ Apps Script)
+- QA Agent (AG007) ถูกตั้งเป็น **อ่านอย่างเดียว** โดยตั้งใจ
+
+### ข้อควรรู้
+
+- งานจะใช้เวลานานขึ้นเมื่อ Agent เรียกเครื่องมือหลายรอบ (ปุ่มอนุมัติจะค้างนานขึ้น)
+- เนื้อหาจากเว็บ/ไฟล์ถูกส่งให้โมเดลโดยระบุว่าเป็น "ข้อมูล ไม่ใช่คำสั่ง" และเครื่องมืออันตรายถูกตัดออกแล้ว แต่ไม่มีระบบใดกัน prompt injection ได้ 100% จึงยังต้องให้ Boss ตรวจก่อนอนุมัติ
+- Agent ใช้ JSON protocol กลางแทน tool-calling เฉพาะค่าย เพื่อให้ระบบสลับโมเดลหลัก/สำรองใน AGENTS ได้เหมือนเดิม

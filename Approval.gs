@@ -18,7 +18,8 @@ function runStep(projectId, stepId) {
   var context = buildStepContext_(project, step, priorSteps);
 
   var task = createTask(projectId, stepId, agent.agent_id, step.step_name, context.instruction, context.contextText);
-  var result = callAgent(agent, context.instruction, context.contextText);
+  var result = runAgent(agent, context.instruction, context.contextText,
+    { projectId: projectId, stepId: stepId, taskId: task.task_id });
   completeTask(task.task_id, result.text, result.ok ? 'DONE' : 'FAILED');
   logAi_(projectId, task.task_id, agent.agent_id, result.model, 'run_step', context.contextText, result.text, result.durationMs);
 
@@ -109,7 +110,8 @@ function rejectStep(stepId, feedback, rollbackScope, rejectedBy) {
     '\n\nProduce a revised version (v' + (Number(step.version) + 1) + ') that directly addresses the feedback above.';
 
   var task = createTask(step.project_id, stepId, agent.agent_id, step.step_name + ' (revision)', context.instruction, revisePrompt);
-  var result = callAgent(agent, context.instruction, revisePrompt);
+  var result = runAgent(agent, context.instruction, revisePrompt,
+    { projectId: step.project_id, stepId: stepId, taskId: task.task_id });
   completeTask(task.task_id, result.text, result.ok ? 'DONE' : 'FAILED');
   logAi_(step.project_id, task.task_id, agent.agent_id, result.model, 'revise_step', revisePrompt, result.text, result.durationMs);
 

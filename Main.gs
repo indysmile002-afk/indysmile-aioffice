@@ -36,6 +36,7 @@ var ROUTES = {
 
   // Agents / logs
   listAgents: function () { return getAllRows('AGENTS'); },
+  listTasks: function (p) { return queryRows('TASKS', p.projectId ? { project_id: p.projectId } : null); },
   listLogs: function (p) { return queryRows('AI_LOGS', p.projectId ? { project_id: p.projectId } : null); },
 
   // Files

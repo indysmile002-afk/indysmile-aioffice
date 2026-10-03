@@ -22,13 +22,14 @@
 
 var SHEET_SCHEMA = {
   USERS: ['user_id', 'email', 'name', 'role', 'status', 'created_at'],
-  AGENTS: ['agent_id', 'agent_name', 'role', 'description', 'primary_model', 'secondary_model', 'status', 'system_prompt'],
+  AGENTS: ['agent_id', 'agent_name', 'role', 'description', 'primary_model', 'secondary_model', 'status', 'system_prompt', 'tools'],
   PROJECTS: ['project_id', 'project_name', 'description', 'type', 'status', 'current_step', 'progress', 'created_at', 'updated_at'],
   TASKS: ['task_id', 'project_id', 'step_id', 'agent_id', 'task_type', 'instruction', 'status', 'input', 'output', 'version', 'created_at', 'updated_at'],
   WORKFLOW_STEPS: ['step_id', 'project_id', 'step_order', 'step_name', 'agent_id', 'status', 'requires_approval', 'depends_on', 'version'],
   APPROVALS: ['approval_id', 'project_id', 'step_id', 'version', 'status', 'feedback', 'approved_by', 'created_at'],
   FILES: ['file_id', 'project_id', 'step_id', 'file_name', 'file_type', 'drive_file_id', 'version', 'status', 'created_at'],
   AI_LOGS: ['log_id', 'project_id', 'task_id', 'agent_id', 'model', 'action', 'input', 'output', 'timestamp', 'duration'],
+  AGENT_MEMORY: ['memory_id', 'project_id', 'agent_id', 'topic', 'content', 'created_at'],
 };
 
 var DRIVE_SUBFOLDERS = ['01_SYSTEM', '02_PROJECTS', '03_KNOWLEDGE', '04_AI_OUTPUTS', '05_APPROVED', '06_REJECTED', '07_ASSETS', '08_REPORTS'];
@@ -62,7 +63,7 @@ function runSetup() {
   Logger.log('Spreadsheet: ' + ss.getUrl());
   Logger.log('Drive root:  ' + root.getUrl());
   Logger.log('Next steps: add your AI provider API keys as Script Properties ' +
-    '(OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, XAI_API_KEY), then deploy as a Web App. See README.md.');
+    '(OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, XAI_API_KEY; optional TAVILY_API_KEY for agent web search), then deploy as a Web App. See README.md.');
 }
 
 function setupSpreadsheet_(props) {
@@ -95,8 +96,32 @@ function setupSpreadsheet_(props) {
   if (agentsSheet.getLastRow() < 2) {
     agentsSheet.getRange(2, 1, DEFAULT_AGENTS.length, DEFAULT_AGENTS[0].length).setValues(DEFAULT_AGENTS);
   }
+  fillDefaultAgentTools_(ss);
 
   return ss;
+}
+
+/** Copies DEFAULT_AGENT_TOOLS (Agent.gs) into blank `tools` cells so they're visible/editable in the sheet. */
+function fillDefaultAgentTools_(ss) {
+  var sheet = ss.getSheetByName('AGENTS');
+  if (!sheet || sheet.getLastRow() < 2) return;
+  var headers = sheet.getRange(1, 1, 1, sheet.getLastColumn()).getValues()[0];
+  var idCol = headers.indexOf('agent_id');
+  var toolsCol = headers.indexOf('tools');
+  if (idCol === -1 || toolsCol === -1) return;
+  var n = sheet.getLastRow() - 1;
+  var ids = sheet.getRange(2, idCol + 1, n, 1).getValues();
+  var range = sheet.getRange(2, toolsCol + 1, n, 1);
+  var cur = range.getValues();
+  var changed = false;
+  for (var i = 0; i < n; i++) {
+    var defaults = DEFAULT_AGENT_TOOLS[ids[i][0]];
+    if (!String(cur[i][0]).trim() && defaults) {
+      cur[i][0] = defaults.join(',');
+      changed = true;
+    }
+  }
+  if (changed) range.setValues(cur);
 }
 
 function setupDriveFolders_(props) {

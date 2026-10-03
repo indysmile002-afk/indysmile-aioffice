@@ -93,6 +93,11 @@
     return queue;
   }
 
+  /** AI_LOGS.action looks like "tool:read_sheet" when an agent used a tool. */
+  function toolNameOf(action) {
+    return String(action || '').indexOf('tool:') === 0 ? String(action).slice(5) : '';
+  }
+
   async function buildActivity(agentsById, projectsById) {
     var logs = await AIOfficeAPI.call('listLogs', {});
     return logs
@@ -105,7 +110,7 @@
         var project = projectsById[l.project_id];
         return {
           icon: meta.icon,
-          title: (agent ? agent.agent_name : l.agent_id) + (l.action === 'revise_step' ? ' แก้ไขงาน' : ' ส่งมอบงาน'),
+          title: (agent ? agent.agent_name : l.agent_id) + (toolNameOf(l.action) ? ' ใช้เครื่องมือ ' + toolNameOf(l.action) : l.action === 'revise_step' ? ' แก้ไขงาน' : ' ส่งมอบงาน'),
           sub: 'โปรเจกต์: ' + (project ? project.name : l.project_id),
           time: fmtTime(l.timestamp),
         };
@@ -161,7 +166,7 @@
           var agent = agents.byId[l.agent_id];
           var name = agent ? agent.agent_name : l.agent_id;
           return {
-            title: name + (l.action === 'revise_step' ? ' แก้ไขงาน (revision)' : ' ทำงานขั้นตอนนี้'),
+            title: name + (toolNameOf(l.action) ? ' ใช้เครื่องมือ ' + toolNameOf(l.action) : l.action === 'revise_step' ? ' แก้ไขงาน (revision)' : ' ทำงานขั้นตอนนี้'),
             agent: name,
             sub: l.model ? 'ผ่าน ' + l.model : l.action,
             time: fmtTime(l.timestamp),
